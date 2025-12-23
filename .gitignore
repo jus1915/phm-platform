@@ -1,0 +1,27 @@
+# secrets
+.env
+
+# runtime / build artifacts
+**/bin/
+**/obj/
+**/packages/
+**/models/
+
+# runtime data
+minio-data/
+pgdata/
+mlflow/
+
+# python
+__pycache__/
+*.pyc
+
+# logs
+*.log
+
+# ide
+.vscode/
+
+# Visual Studio
+.vs/
+**/.vs/

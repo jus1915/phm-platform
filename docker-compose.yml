@@ -1,0 +1,280 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: admin12345
+    command: server /data --console-address ":9001"
+    ports:
+      - "19000:9000"   # ✅ S3 API
+      - "19001:9001"   # Web 콘솔
+    volumes:
+      - ./minio-data:/data
+    networks:
+      - mlops_net
+
+  postgres:
+    image: postgres:16
+    container_name: phm-postgres
+    #restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: ${TZ}
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    networks:
+      - mlops_net
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mlflow:
+    image: python:3.11-slim
+    container_name: mlflow
+    init: true
+    working_dir: /mlflow
+    volumes:
+      - ./mlflow:/mlflow
+    ports:
+      - "5000:5000"
+    command: >
+      bash -lc "
+        set -euo pipefail;
+        # ✅ 새로 만들어지는 파일/디렉터리를 777로 만들기
+        umask 000;
+
+        apt-get update &&
+        apt-get install -y --no-install-recommends curl git &&
+        rm -rf /var/lib/apt/lists/*;
+
+        pip install --no-cache-dir 'mlflow[extras]==2.16.0' gunicorn;
+
+        mkdir -p /mlflow/artifacts /mlflow/mlruns;
+        # 기존 것들도 한번 싹 열어주기
+        chmod -R 777 /mlflow;
+
+        export MLFLOW_BACKEND_STORE_URI=sqlite:////mlflow/mlruns.db;
+        export MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/mlruns;
+
+        exec gunicorn -b 0.0.0.0:5000 --workers 2 --timeout 120 'mlflow.server:app'
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5000/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mlops_net
+
+  airflow-init:
+    image: ${AIRFLOW_IMAGE:-apache/airflow:2.10.2-python3.11}
+    container_name: airflow-init
+    entrypoint: bash
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        airflow db init
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password admin || true
+    env_file: .env
+    environment:
+      TZ: ${TZ}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      _PIP_ADDITIONAL_REQUIREMENTS: "minio pandas sqlalchemy psycopg2-binary python-dotenv"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./accel_server:/opt/airflow/accel_server
+      - ./data-collection/etl:/opt/airflow/etl
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - postgres
+    networks:
+      - mlops_net
+
+  airflow-webserver:
+    image: ${AIRFLOW_IMAGE:-apache/airflow:2.10.2-python3.11}
+    container_name: airflow-webserver
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      MLFLOW_EXPERIMENT: ${MLFLOW_EXPERIMENT}
+      MLFLOW_MODEL_NAME: ${MLFLOW_MODEL_NAME}
+      AE_PATCH_LIMIT: ${AE_PATCH_LIMIT}
+      AE_PATCH_FRACTION: ${AE_PATCH_FRACTION}
+      _PIP_ADDITIONAL_REQUIREMENTS: "minio pandas sqlalchemy psycopg2-binary python-dotenv"
+    command: webserver
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./accel_server:/opt/airflow/accel_server
+      - ./data-collection/etl:/opt/airflow/etl
+      - ./mlflow:/mlflow
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy            # Postgres 헬시 체크 통과
+      airflow-init:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_started
+    networks:
+      - mlops_net
+
+  airflow-scheduler:
+    image: ${AIRFLOW_IMAGE:-apache/airflow:2.10.2-python3.11}
+    container_name: airflow-scheduler
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      MLFLOW_EXPERIMENT: ${MLFLOW_EXPERIMENT}
+      MLFLOW_MODEL_NAME: ${MLFLOW_MODEL_NAME}
+      AE_PATCH_LIMIT: ${AE_PATCH_LIMIT}
+      AE_PATCH_FRACTION: ${AE_PATCH_FRACTION}
+      _PIP_ADDITIONAL_REQUIREMENTS: "minio pandas sqlalchemy psycopg2-binary python-dotenv"
+    command: scheduler
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./accel_server:/opt/airflow/accel_server
+      - ./data-collection/etl:/opt/airflow/etl
+      - ./train:/opt/airflow/train
+      - ./mlflow:/mlflow
+      - "D:/hvs/phm-platform/data-collection/phm-data-pipeline/bin/x64/Debug/models:/realtime_models"
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_started
+    networks:
+      - mlops_net
+
+  airflow-triggerer:
+    image: ${AIRFLOW_IMAGE:-apache/airflow:2.10.2-python3.11}
+    container_name: airflow-triggerer
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      _PIP_ADDITIONAL_REQUIREMENTS: "minio pandas sqlalchemy psycopg2-binary python-dotenv"
+    command: triggerer
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./data-collection/etl:/opt/airflow/etl
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./mlflow:/mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - mlops_net
+
+  accel-server:
+    build:
+      context: ./accel_server
+      dockerfile: Dockerfile.accel
+    container_name: accel-server
+    #restart: unless-stopped
+    env_file: .env
+    working_dir: /accel_server
+    environment:
+      TZ: ${TZ}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      MLFLOW_EXPERIMENT: ${MLFLOW_EXPERIMENT}
+      MLFLOW_MODEL_NAME: ${MLFLOW_MODEL_NAME}
+
+      ACCEL_BASE: ${ACCEL_BASE}
+      ACCEL_PARQUET_BASE: ${ACCEL_PARQUET_BASE}
+
+      ACCEL_DATA_DIR: ${ACCEL_DATA_DIR}
+
+      ACCEL_ANOM_DEVICES: ${ACCEL_ANOM_DEVICES}
+
+    volumes:
+      - ./accel_server:/accel_server
+      - ./mlflow:/mlflow
+
+    ports:
+      - "${ACCEL_HTTP_PORT}:8000"
+    depends_on:
+      - mlflow
+    networks:
+      - mlops_net
+
+networks:
+  mlops_net:
+
+volumes:
+  postgres_data:
