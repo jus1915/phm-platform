@@ -241,37 +241,37 @@ services:
     networks:
       - mlops_net
 
-  accel-server:
-    build:
-      context: ./accel_server
-      dockerfile: Dockerfile.accel
-    container_name: accel-server
-    #restart: unless-stopped
-    env_file: .env
-    working_dir: /accel_server
-    environment:
-      TZ: ${TZ}
-      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
-      MLFLOW_EXPERIMENT: ${MLFLOW_EXPERIMENT}
-      MLFLOW_MODEL_NAME: ${MLFLOW_MODEL_NAME}
+  # accel-server:
+  #   build:
+  #     context: ./accel_server
+  #     dockerfile: Dockerfile.accel
+  #   container_name: accel-server
+  #   #restart: unless-stopped
+  #   env_file: .env
+  #   working_dir: /accel_server
+  #   environment:
+  #     TZ: ${TZ}
+  #     MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+  #     MLFLOW_EXPERIMENT: ${MLFLOW_EXPERIMENT}
+  #     MLFLOW_MODEL_NAME: ${MLFLOW_MODEL_NAME}
 
-      ACCEL_BASE: ${ACCEL_BASE}
-      ACCEL_PARQUET_BASE: ${ACCEL_PARQUET_BASE}
+  #     ACCEL_BASE: ${ACCEL_BASE}
+  #     ACCEL_PARQUET_BASE: ${ACCEL_PARQUET_BASE}
 
-      ACCEL_DATA_DIR: ${ACCEL_DATA_DIR}
+  #     ACCEL_DATA_DIR: ${ACCEL_DATA_DIR}
 
-      ACCEL_ANOM_DEVICES: ${ACCEL_ANOM_DEVICES}
+  #     ACCEL_ANOM_DEVICES: ${ACCEL_ANOM_DEVICES}
 
-    volumes:
-      - ./accel_server:/accel_server
-      - ./mlflow:/mlflow
+  #   volumes:
+  #     - ./accel_server:/accel_server
+  #     - ./mlflow:/mlflow
 
-    ports:
-      - "${ACCEL_HTTP_PORT}:8000"
-    depends_on:
-      - mlflow
-    networks:
-      - mlops_net
+  #   ports:
+  #     - "${ACCEL_HTTP_PORT}:8000"
+  #   depends_on:
+  #     - mlflow
+  #   networks:
+  #     - mlops_net
 
 networks:
   mlops_net:
